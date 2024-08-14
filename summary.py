@@ -1,20 +1,13 @@
 import os
 import torch
-import sys
-import csv
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-
-# 입력 인코딩 설정
-import io
-sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+from langchain_community.llms import HuggingFacePipeline
+from langchain.prompts import PromptTemplate
 
 # GPU 설정
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,3"
 
 # int4 양자화를 위한 BitsAndBytesConfig 설정
 bnb_config = BitsAndBytesConfig(
@@ -34,94 +27,82 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 model.eval()
 
-# 임베딩 모델 설정
-embed_model_name = "jhgan/ko-sroberta-multitask"
-embeddings = HuggingFaceEmbeddings(
-    model_name=embed_model_name,
-    model_kwargs={'device': 'cuda'},
-    encode_kwargs={'normalize_embeddings': True}
+# HuggingFacePipeline 생성
+pipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens=1024,
+    temperature=0.3,
+    top_p=0.95,
+    repetition_penalty=1.15
 )
 
-# PDF 파일 로드 및 처리 함수 (5페이지씩 나누어서 처리)
-def load_and_process_pdfs(directory):
-    documents = []
-    for filename in os.listdir(directory):
-        if filename.endswith('.pdf'):
-            loader = PyPDFLoader(os.path.join(directory, filename))
-            documents.extend(loader.load())
+# LangChain용 LLM 객체 생성
+llm = HuggingFacePipeline(pipeline=pipe)
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=0)
-    texts = text_splitter.split_documents(documents)
+# 프롬프트 템플릿 생성
+summarize_prompt = PromptTemplate(
+    input_variables=["text"],
+    template="다음 텍스트를 간결하게 요약해주세요:\n\n{text}\n\n요약:"
+)
+
+def summarize_pdf(file_path, llm, tokenizer):
+    loader = PyPDFLoader(file_path)
+    pages = loader.load_and_split()
     
-    # 5페이지 단위로 나누기 및 페이지 범위 추적
-    chunks = [texts[i:i + 5] for i in range(0, len(texts), 5)]
-    summaries_with_pages = []
+    summaries = []
+    current_chunk = []
+    page_count = 0
     
-    for i, chunk in enumerate(chunks):
-        combined_text = "\n".join([doc.page_content for doc in chunk])
-        start_page = i * 5 + 1
-        end_page = start_page + len(chunk) - 1
-        summaries_with_pages.append((combined_text, start_page, end_page))
-    
-    return summaries_with_pages
-
-# 벡터 데이터베이스 생성 함수
-def create_vector_db(texts):
-    db = Chroma.from_documents(texts, embeddings)
-    return db
-
-# RAG 체인 생성
-def create_rag_chain(db):
-    retriever = db.as_retriever(search_kwargs={"k": 7})  # k 값을 7로 증가
-
-    def rag_chain(query):
-        docs = retriever.get_relevant_documents(query)
-        context = "\n".join([doc.page_content for doc in docs])
+    for page in pages:
+        current_chunk.append(page.page_content)
+        page_count += 1
         
-        messages = [
-            {"role": "system", "content": PROMPT},
-        ]
-        
-        # 현재 쿼리 추가
-        messages.append({"role": "user", "content": f"Context: {context}\n\nQuestion: {query}"})
+        if page_count == 5 or page == pages[-1]:  # 5페이지마다 또는 마지막 페이지에서 처리
+            chunk_text = "\n".join(current_chunk)
+            prompt = summarize_prompt.format(text=chunk_text)
+            
+            response = llm(prompt)
+            summaries.append(response)
+            
+            current_chunk = []
+            page_count = 0
+        print(page_count)
+    return summaries
 
-        input_ids = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
-        ).to(model.device)
+def save_summaries(summaries, output_file):
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for i, summary in enumerate(summaries, 1):
+            f.write(f"Section {i} Summary:\n{summary}\n\n")
+            print("hello2")
+def generate_final_summary(summaries, llm):
+    combined_summaries = "\n".join(summaries)
+    final_prompt = summarize_prompt.format(text=combined_summaries)
+    return llm(final_prompt)
 
-        terminators = [
-            tokenizer.eos_token_id,
-            tokenizer.convert_tokens_to_ids("")
-        ]
-
-        with torch.no_grad():
-            outputs = model.generate(
-                input_ids,
-                max_new_tokens=2048,
-                eos_token_id=terminators,
-                do_sample=True,
-                temperature=0.6,
-                top_p=0.9,
-                repetition_penalty=1.1
-            )
-
-        response = tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=True)
-        return response
-
-    return rag_chain
-
-# 메인 실행 부분
-PROMPT = '''당신은 유용한 AI 어시스턴트입니다. 사용자의 질의에 대해 친절하고 정확하게 답변해야 합니다. You are a helpful AI assistant, you'll need to answer users' queries in a friendly and accurate manner. you must answer in korean'''
-
-# PDF 파일 처리 및 요약 저장
-summaries_with_pages = load_and_process_pdfs("./data")
-
-# CSV 파일에 요약 저장 (페이지 범위 포함)
-with open('summaries.csv', 'w', newline='', encoding='utf-8') as csvfile:
-    csvwriter = csv.writer(csvfile)
-    csvwriter.writerow(['Start Page', 'End Page', 'Summary'])  # 헤더 추가
+def main():
+    pdf_directory = "./data"
+    output_file = "summary.txt"
     
-    for summary, start_page, end_page in summaries_with_pages:
-        csvwriter.writerow([start_page, end_page, summary])
+    all_summaries = []
+    
+    filename="collegemanage.pdf"
+    file_path = os.path.join(pdf_directory, filename)
+    print(f"Processing {filename}...")
+    summaries = summarize_pdf(file_path, llm, tokenizer)
+    all_summaries.extend(summaries)
+    print("hello")
+    save_summaries(all_summaries, output_file)
+    print(f"Individual summaries saved to {output_file}")
+    
+    final_summary = generate_final_summary(all_summaries, llm)
+    
+    with open(output_file, 'a', encoding='utf-8') as f:
+        f.write("\nFinal Overall Summary:\n")
+        f.write(final_summary)
+    
+    print(f"Final summary appended to {output_file}")
 
-print("요약이 완료되어 summaries.csv 파일에 저장되었습니다.")
+if __name__ == "__main__":
+    main()
