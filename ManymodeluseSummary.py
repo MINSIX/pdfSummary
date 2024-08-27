@@ -31,7 +31,7 @@ bnb_config = BitsAndBytesConfig(
 )
 
 def load_models():
-    embedding_model = "jhgan/ko-sbert-nli"
+    embedding_model = "BAAI/bge-m3"
     query_generation_model = "beomi/gemma-ko-2b"
     
     summary_model = "MLP-KTLim/llama3-Bllossom"
@@ -86,17 +86,36 @@ def create_vectorstore(texts, embedding_model):
 #     chain = LLMChain(llm=query_model, prompt=prompt)
 #     query = chain.run(text)
 #     return query
+# def generate_query(text, query_model):
+#     prompt = PromptTemplate(
+#         input_variables=["text"],
+#         template="다음 텍스트가 주어지면 주요 주제를 캡처하는 검색 쿼리를 한국어로 생성해주세요:\n\n{text}\n\nSearch query:"
+#     )
+#     chain = LLMChain(llm=query_model, prompt=prompt)
+#     query = chain.run(text)
+#     return query
+def search_documents(query, vectorstore):
+    results = vectorstore.similarity_search(query, k=5)
+    return "\n".join([doc.page_content for doc in results])
+
 def generate_query(text, query_model):
     prompt = PromptTemplate(
         input_variables=["text"],
-        template="다음 텍스트가 주어지면 주요 주제를 캡처하는 검색 쿼리를 한국어로 생성해주세요:\n\n{text}\n\nSearch query:"
+        template="\n\n{text} 에서 주요 주제를 추출하여 한국어로 검색 쿼리를 생성\n\n검색 쿼리:"
     )
     chain = LLMChain(llm=query_model, prompt=prompt)
     query = chain.run(text)
     return query
-def search_documents(query, vectorstore):
-    results = vectorstore.similarity_search(query, k=5)
-    return "\n".join([doc.page_content for doc in results])
+
+def summarize_text(text, summary_model):
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="\n\n{text}를 한국어로 요약\n\nSummary: "
+    )
+    chain = LLMChain(llm=summary_model, prompt=prompt)
+    summary = chain.run(text)
+    return summary
+
 
 # def summarize_text(text, summary_model):
 #     prompt = PromptTemplate(
@@ -106,14 +125,14 @@ def search_documents(query, vectorstore):
 #     chain = LLMChain(llm=summary_model, prompt=prompt)
 #     summary = chain.run(text)
 #     return summary
-def summarize_text(text, summary_model):
-    prompt = PromptTemplate(
-        input_variables=["text"],
-        template="\n\n다음 텍스트를 한국어로 요약해주세요 : \n\n{text}\n\nSummary:"
-    )
-    chain = LLMChain(llm=summary_model, prompt=prompt)
-    summary = chain.run(text)
-    return summary
+# def summarize_text(text, summary_model):
+#     prompt = PromptTemplate(
+#         input_variables=["text"],
+#         template="\n\n다음 텍스트를 한국어로 요약해주세요 : \n\n{text}\n\nSummary:"
+#     )
+#     chain = LLMChain(llm=summary_model, prompt=prompt)
+#     summary = chain.run(text)
+#     return summary
 # summary 추출 함수
 def extract_summary(text):
     start = text.find('Summary:')
@@ -139,7 +158,7 @@ def main():
     query_model = create_hf_pipeline(query_generation_model)
     # search_llm = create_hf_pipeline(search_model)
     summary_llm = create_hf_pipeline(summary_model)
-    file_name='summariessunwa_14'
+    file_name='summariessunwa_17'
     with open(file_name+'.csv', 'w', newline='', encoding='utf-8') as csvfile:
         csvwriter = csv.writer(csvfile)
         csvwriter.writerow(['Start Page', 'End Page', 'Summary'])
@@ -185,7 +204,7 @@ def main():
     import torch
 
     # 모델 및 토크나이저 로드
-    model_name = "beomi/Llama-3-KoEn-8B-Instruct-preview"
+    model_name = "sh2orc/Llama-3.1-Korean-8B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
@@ -195,21 +214,9 @@ def main():
 
     # 영어를 한국어로 번역하는 함수
 
-    def translate_text(model,tokenizer,text, source_language='en', target_language='ko'):
-        """
-        텍스트를 번역하는 함수입니다.
-        Args:
-            text (str): 번역할 원본 텍스트
-            source_language (str): 원본 텍스트의 언어 (기본값: 'en' - 영어)
-            target_language (str): 번역할 목표 언어 (기본값: 'ko' - 한국어)
-            
-        Returns:
-            str: 번역된 텍스트
-        """
-        # 번역 프롬프트 생성
-        prompt = f"다음에 나오는 텍스트에 있는 영어를 한국어로 번역해주세요 :  {text}"
+    def translate_text(model, tokenizer, text, source_language='en', target_language='ko'):
+        prompt = f"{text} 이것을 한국어로 번역 \n\n"
         
-        # 입력 텍스트를 토큰화
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
         
         with torch.no_grad():
@@ -220,10 +227,10 @@ def main():
                 temperature=0.3,
                 top_p=0.9,
             )
-        # 번역된 텍스트 디코딩
+        
         translated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        print(translated_text)
         return translated_text
+
 
 # 입력 파일 열기 및 번역 수행
     with open(input_file, 'r', encoding='utf-8') as infile, \
