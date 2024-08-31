@@ -148,6 +148,22 @@ def extract_summary(text):
         summary_text = summary_text[:end].strip()
     
     return summary_text
+def translate_text(model, tokenizer, text, source_language='en', target_language='ko'):
+    prompt = f"{text} 이것을 한국어로 번역 \n\n"
+    
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+    
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=512,
+            do_sample=True,
+            temperature=0.3,
+            top_p=0.9,
+        )
+    
+    translated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return translated_text
 def main():
     import csv
     embedding_model, query_generation_model,  summary_model = load_models()
@@ -199,47 +215,34 @@ def main():
                     print(f"Extracted Summary: {summary}")
 
     print(f"Summary has been extracted and saved to {output_file}")
-    import csv
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    import torch
 
-    # 모델 및 토크나이저 로드
-    model_name = "sh2orc/Llama-3.1-Korean-8B-Instruct"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-
-    # 입력 및 출력 파일명 설정
-    input_file = output_file
-    output_file = 'result_'+input_file
 
     # 영어를 한국어로 번역하는 함수
 
-    def translate_text(model, tokenizer, text, source_language='en', target_language='ko'):
-        prompt = f"{text} 이것을 한국어로 번역 \n\n"
-        
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-        
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=512,
-                do_sample=True,
-                temperature=0.3,
-                top_p=0.9,
-            )
-        
-        translated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return translated_text
+
 
 
 # 입력 파일 열기 및 번역 수행
-    with open(input_file, 'r', encoding='utf-8') as infile, \
-        open(output_file, 'w', encoding='utf-8') as outfile:
-        for line in infile:
-            translated_line = translate_text(model=model,tokenizer=tokenizer,text=line.strip(), source_language='en', target_language='ko')  # 줄 단위로 번역
-            outfile.write(translated_line + '\n')  # 번역된 줄을 출력 파일에 저장
+# 이거 하면 오히려 별로인듯
+    # import csv
+    # from transformers import AutoTokenizer, AutoModelForCausalLM
+    # import torch
 
-    print(f"Translated content has been saved to {output_file}")
+    # # 모델 및 토크나이저 로드
+    # model_name = "sh2orc/Llama-3.1-Korean-8B-Instruct"
+    # tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    # # 입력 및 출력 파일명 설정
+    # input_file = output_file
+    # output_file = 'result_'+input_file
+    # with open(input_file, 'r', encoding='utf-8') as infile, \
+    #     open(output_file, 'w', encoding='utf-8') as outfile:
+    #     for line in infile:
+    #         translated_line = translate_text(model=model,tokenizer=tokenizer,text=line.strip(), source_language='en', target_language='ko')  # 줄 단위로 번역
+    #         outfile.write(translated_line + '\n')  # 번역된 줄을 출력 파일에 저장
+
+    # print(f"Translated content has been saved to {output_file}")
 
 if __name__ == "__main__":
     main()
