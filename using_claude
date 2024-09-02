@@ -1,0 +1,127 @@
+from PyPDF2 import PdfReader
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.schema import Document
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.chains import RetrievalQA
+from langchain.llms import HuggingFacePipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from langchain.retrievers.document_compressors import LLMChainExtractor
+import torch
+
+# GPU 사용 여부 확인
+device = 0 if torch.cuda.is_available() else -1
+
+# PDF에서 텍스트 추출 함수
+def extract_text_from_pdf(path):
+    reader = PdfReader(path)
+    texts = [page.extract_text() for page in reader.pages]
+    return texts
+
+# 문서 조각 생성 함수
+def split_text(text, chunk_size=2000):
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+# 특정 페이지 범위의 텍스트 추출
+def extract_text_from_pages(texts, start_page, end_page):
+    return "".join(texts[start_page-1:end_page])
+
+# 페이지 범위 생성 함수
+def generate_page_ranges(total_pages, range_size):
+    return [(i, min(i + range_size - 1, total_pages)) for i in range(1, total_pages + 1, range_size)]
+
+# 임베딩 모델 로드 (전역 변수로 선언)
+embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+
+# 임베딩 캐시
+embedding_cache = {}
+
+# 캐시된 임베딩 함수
+def cached_embedding(text):
+    if text not in embedding_cache:
+        embedding_cache[text] = embeddings.embed_query(text)
+    return embedding_cache[text]
+
+# 페이지 범위 처리 함수
+def process_page_range(start_page, end_page, pdf_texts, hf_llm):
+    # 페이지 범위의 텍스트 추출
+    page_text = extract_text_from_pages(pdf_texts, start_page, end_page)
+    
+    # 텍스트를 여러 조각으로 나누기
+    chunked_texts = split_text(page_text, chunk_size=2000)
+    
+    # 여러 문서 객체 생성
+    documents = [Document(page_content=chunk, metadata={"source": f"Pages {start_page}-{end_page}"}) for chunk in chunked_texts]
+
+    # 문서 객체를 사용하여 FAISS 벡터 저장소 생성 (캐시된 임베딩 사용)
+    vectorstore = FAISS.from_documents(documents, embeddings)
+
+    # Create a retriever from the vector store
+    retriever = vectorstore.as_retriever()
+
+    # TF-IDF 기반 압축기 생성
+    compressor = LLMChainExtractor.from_llm(hf_llm)
+
+    # Retriever와 Compressor 결합
+    compression_retriever = ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=retriever
+    )
+
+    # QA 체인 생성
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=hf_llm,
+        retriever=compression_retriever,
+        return_source_documents=True
+    )
+
+    # 질문에 대해 요약 생성
+    summary_query = f"{start_page}-{end_page} 페이지의 내용을 요약해주세요. 답변 서식은 일정하게 해주세요"
+    result = qa_chain.invoke({"query": summary_query})
+    
+    return f"\n페이지 {start_page}-{end_page} 요약:\n{result['result']}\n"
+
+# 메인 함수
+def main():
+    # PDF에서 텍스트 추출
+    pdf_path = "./collegemanage.pdf"
+    pdf_texts = extract_text_from_pdf(pdf_path)
+
+    # 전체 페이지 수 계산
+    total_pages = len(pdf_texts)
+
+    # 페이지 범위 생성 (10페이지씩 나누기)
+    page_ranges = generate_page_ranges(total_pages,5)
+
+    # 모델과 토크나이저 로드 (더 작은 모델 사용)
+    model_name = "sh2orc/Llama-3.1-Korean-8B-Instruct"
+    model = AutoModelForCausalLM.from_pretrained(model_name).to(torch.float32)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # 모델과 토크나이저로 파이프라인 정의
+    llm_pipeline = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        max_new_tokens=256,
+    )
+
+    # Define the LLM with the HuggingFace pipeline
+    hf_llm = HuggingFacePipeline(pipeline=llm_pipeline)
+
+    # 순차적으로 페이지 범위 처리
+    results = []
+    for start, end in page_ranges:
+        result = process_page_range(start, end, pdf_texts, hf_llm)
+        results.append(result)
+
+    # 결과를 파일에 저장
+    with open("response_optimized.txt", "w", encoding="utf-8") as f:
+        for result in results:
+            f.write(result)
+
+    print("모든 요약이 response_optimized.txt에 저장되었습니다.")
+
+if __name__ == "__main__":
+    main()
